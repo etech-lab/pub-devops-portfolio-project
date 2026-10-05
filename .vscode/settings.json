@@ -1,0 +1,24 @@
+{
+  "editor.defaultFormatter": "charliermarsh.ruff",
+  "editor.formatOnSave": true,
+  "ruff.enable": true,
+  "ruff.lintOnSave": true,
+
+  "cSpell.enabledLanguageIds": [
+    "markdown",
+    "plaintext"
+  ],
+  "cSpell.ignorePaths": [
+    "**/node_modules/**",
+    "**/.git/**",
+    "**/__pycache__/**",
+    "**/*.pyc"
+  ],
+  "cSpell.words": [
+    "WebsiteTester",
+    "CloudFormation",
+    "SecretsManager",
+    "dockerfile",
+    "webtester"
+  ]
+}

@@ -1,0 +1,32 @@
+{
+	"family": "websitetester-task",
+	"networkMode": "awsvpc",
+	"requiresCompatibilities": [
+		"FARGATE"
+	],
+	"cpu": "512",
+	"memory": "1024",
+	"executionRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/websitetester-service-execution-role",
+	"taskRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/websitetester-service-task-role",
+	"containerDefinitions": [
+		{
+			"name": "websitetester",
+			"image": "<AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/websitetester:dev",
+			"essential": true,
+			"portMappings": [
+				{
+					"containerPort": 22,
+					"protocol": "tcp"
+				}
+			],
+			"logConfiguration": {
+				"logDriver": "awslogs",
+				"options": {
+					"awslogs-group": "/ecs/websitetester",
+					"awslogs-region": "us-east-1",
+					"awslogs-stream-prefix": "ecs"
+				}
+			}
+		}
+	]
+}

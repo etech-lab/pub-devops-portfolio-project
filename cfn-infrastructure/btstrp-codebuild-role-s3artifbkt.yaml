@@ -1,0 +1,280 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  IAM role, policies, and S3 artifact bucket for AWS CodeBuild infrastructure deployments.
+  The S3 bucket is created here as part of the bootstrap process so it exists before CodePipeline
+  is deployed and can reference it as a parameter.
+  Deploy with stack name 'btstrp-codebuild-infra-role-stack'.
+
+Parameters:
+  ArtifactBucketName:
+    Type: String
+    Description: Required. Provide a globally unique S3 bucket name you control and use the same name when configuring the pipeline.
+
+Resources:
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: codebuild-infra-deploy-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Purpose
+          Value: CodeBuildInfraDeployment
+
+  CodeBuildPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: codebuild-infra-deploy-policy
+      Description: Permissions for CodeBuild to deploy infrastructure
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CloudFormationAccess
+            Effect: Allow
+            Action:
+              - cloudformation:CreateStack
+              - cloudformation:UpdateStack
+              - cloudformation:DeleteStack
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStackResources
+              - cloudformation:GetTemplate
+              - cloudformation:ValidateTemplate
+              - cloudformation:CreateChangeSet
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:DeleteChangeSet
+              - cloudformation:ListExports
+            Resource: '*'
+          - Sid: EC2VPCNetworkingAccess
+            Effect: Allow
+            Action:
+              - ec2:*
+              - elasticloadbalancing:*
+            Resource: '*'
+          - Sid: RDSAccess
+            Effect: Allow
+            Action:
+              - rds:*
+            Resource: '*'
+          - Sid: SecretsManagerAccess
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:DescribeSecret
+            Resource: '*'
+          - Sid: IAMAccess
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:CreateInstanceProfile
+              - iam:DeleteInstanceProfile
+              - iam:AddRoleToInstanceProfile
+              - iam:RemoveRoleFromInstanceProfile
+              - iam:PassRole
+              - iam:TagRole
+              - iam:GetInstanceProfile
+            Resource: '*'
+          - Sid: LogsAccess
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+          - Sid: S3ArtifactAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${ArtifactBucketName}/*'
+          - Sid: S3ArtifactBucketAccess
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketVersioning
+            Resource: !Sub 'arn:aws:s3:::${ArtifactBucketName}'
+          - Sid: ECRAccess
+            Effect: Allow
+            Action:
+              - ecr:GetAuthorizationToken
+              - ecr:BatchCheckLayerAvailability
+              - ecr:CompleteLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:InitiateLayerUpload
+              - ecr:PutImage
+              - ecr:BatchGetImage
+              - ecr:DescribeRepositories
+            Resource: '*'
+          - Sid: ECSAccess
+            Effect: Allow
+            Action:
+              - ecs:DescribeServices
+              - ecs:DescribeTasks
+              - ecs:DescribeTaskDefinition
+              - ecs:ListTasks
+              - ecs:ListServices
+              - ecs:ListClusters
+              - ecs:RunTask
+              - ecs:StopTask
+              - ecs:UpdateService
+              - ecs:WaitUntilServicesStable
+            Resource: '*'
+
+      Roles:
+        - !Ref CodeBuildServiceRole
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ArtifactBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  CloudFormationDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cloudformation-infra-deploy-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Purpose
+          Value: CloudFormationInfraDeployment
+
+  CloudFormationDeployPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: cloudformation-infra-deploy-policy
+      Description: Permissions for CloudFormation to create and update infrastructure stacks
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EC2VPCNetworkingAccess
+            Effect: Allow
+            Action:
+              - ec2:*
+              - elasticloadbalancing:*
+            Resource: '*'
+          - Sid: RDSAccess
+            Effect: Allow
+            Action:
+              - rds:*
+            Resource: '*'
+          - Sid: SecretsManagerAccess
+            Effect: Allow
+            Action:
+              - secretsmanager:CreateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:DescribeSecret
+              - secretsmanager:GetRandomPassword
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:UpdateSecret
+              - secretsmanager:TagResource
+            Resource: '*'
+          - Sid: IAMAccess
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:CreateInstanceProfile
+              - iam:DeleteInstanceProfile
+              - iam:AddRoleToInstanceProfile
+              - iam:RemoveRoleFromInstanceProfile
+              - iam:PassRole
+              - iam:TagRole
+              - iam:GetInstanceProfile
+            Resource: '*'
+          - Sid: SSMParameterAccess
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+            Resource: '*'
+          - Sid: S3ArtifactAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource: !Sub 'arn:aws:s3:::${ArtifactBucketName}/*'
+          - Sid: ECSAccess
+            Effect: Allow
+            Action:
+              - ecs:RegisterTaskDefinition
+              - ecs:DeregisterTaskDefinition
+              - ecs:CreateCluster
+              - ecs:DeleteCluster
+              - ecs:DescribeClusters
+              - ecs:CreateService
+              - ecs:UpdateService
+              - ecs:DeleteService
+              - ecs:DescribeServices
+              - ecs:DescribeTaskDefinition
+              - ecs:RunTask
+              - ecs:DescribeTasks
+              - ecs:StopTask
+              - ecs:TagResource
+              - ecs:UntagResource
+              - ecs:ListTagsForResource
+            Resource: '*'
+          - Sid: LogsAccess
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:PutRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+      Roles:
+        - !Ref CloudFormationDeployRole
+
+Outputs:
+  CodeBuildRoleArn:
+    Description: ARN of CodeBuild service role
+    Value: !GetAtt CodeBuildServiceRole.Arn
+    Export:
+      Name: CodeBuildInfraRoleArn
+
+  CodeBuildRoleName:
+    Description: Name of CodeBuild service role
+    Value: !Ref CodeBuildServiceRole
+    Export:
+      Name: CodeBuildInfraRoleName
+
+  ArtifactBucketName:
+    Description: Name of the S3 artifact bucket
+    Value: !Ref ArtifactBucket
+    Export:
+      Name: CodeBuildArtifactBucketName
+
+  CloudFormationDeployRoleArn:
+    Description: ARN of CloudFormation execution role for infrastructure stack deployments
+    Value: !GetAtt CloudFormationDeployRole.Arn
+    Export:
+      Name: CloudFormationInfraDeployRoleArn

@@ -1,0 +1,400 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS CodePipeline for application delivery to ECS.
+  Stages: Source -> Validate -> BuildPush -> Approval -> Deploy -> Migrate -> Verify.
+  Deploy with stack name 'btstrp-codepipeline-app-stack'.
+  The default name for the ECS cluster is 'websitetester-cluster' and the default name for the ECS service stack is 'ecs-service-stack'.
+  Be sure to stick with the default names or update the parameters in this stack and the ECS service stack to match.
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: etech-lab
+    Description: GitHub organization or username that owns the repository.
+
+  GitHubRepo:
+    Type: String
+    Default: DevOps_WebsiteTester
+    Description: GitHub repository name.
+
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: GitHub branch to track.
+
+  GitHubConnectionArn:
+    Type: String
+    Description: ARN of GitHub CodeStar connection.
+
+  CodeBuildRoleArn:
+    Type: String
+    Description: ARN of CodeBuild service role.
+
+  CloudFormationDeployRoleArn:
+    Type: String
+    Description: ARN of CloudFormation execution role used for deploy action.
+
+  ArtifactBucketName:
+    Type: String
+    Description: S3 bucket name for pipeline artifacts.
+
+  ApprovalEmail:
+    Type: String
+    Description: Email address to receive manual approval notifications.
+
+  EcrRepositoryName:
+    Type: String
+    Default: websitetester
+    Description: ECR repository name that stores application images.
+
+  EcsServiceStackName:
+    Type: String
+    Default: ecs-service-stack
+    Description: CloudFormation stack name for ECS service deployment.
+
+  EcsClusterName:
+    Type: String
+    Default: websitetester-cluster
+    Description: ECS cluster name used for post-deploy verification. Default must match
+      ClusterName in ecs-cluster.yaml and ecs-service.yaml.
+
+  NlbStackName:
+    Type: String
+    Default: devops-nlb-stack
+    Description: NLB stack name used for post-deploy reachability check. Default matches
+      the stack deployed by the infra pipeline, keep default unless that stack was renamed.
+
+Resources:
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: codepipeline-app-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+
+  CodePipelinePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: codepipeline-app-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:GetObjectVersion
+            Resource: !Sub 'arn:aws:s3:::${ArtifactBucketName}/*'
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource: !Sub 'arn:aws:s3:::${ArtifactBucketName}'
+          - Effect: Allow
+            Action:
+              - codebuild:BatchGetBuilds
+              - codebuild:BatchGetProjects
+              - codebuild:StartBuild
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - codeconnections:UseConnection
+            Resource: !Ref GitHubConnectionArn
+          - Effect: Allow
+            Action:
+              - cloudformation:CreateStack
+              - cloudformation:UpdateStack
+              - cloudformation:DeleteStack
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:GetTemplateSummary
+              - cloudformation:CreateChangeSet
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:DeleteChangeSet
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !Ref CodeBuildRoleArn
+              - !Ref CloudFormationDeployRoleArn
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref AppApproveTopic
+      Roles:
+        - !Ref CodePipelineRole
+
+  AppApproveTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: app-pipeline-approval
+
+  AppApproveTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AppApproveTopic
+      Protocol: email
+      Endpoint: !Ref ApprovalEmail
+
+  AppValidateProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: app-validate
+      ServiceRole: !Ref CodeBuildRoleArn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        Type: LINUX_CONTAINER
+      TimeoutInMinutes: 15
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspecs/app-validate-buildspec.yml
+
+  AppBuildPushProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: app-build-push
+      ServiceRole: !Ref CodeBuildRoleArn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:7.0
+        Type: LINUX_CONTAINER
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ECR_REPOSITORY_NAME
+            Type: PLAINTEXT
+            Value: !Ref EcrRepositoryName
+      TimeoutInMinutes: 30
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspecs/app-build-push-buildspec.yml
+
+  AppMigrateProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: app-migrate
+      ServiceRole: !Ref CodeBuildRoleArn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: ECS_CLUSTER_NAME
+            Type: PLAINTEXT
+            Value: !Ref EcsClusterName
+          - Name: ECS_SERVICE_STACK_NAME
+            Type: PLAINTEXT
+            Value: !Ref EcsServiceStackName
+          - Name: VPC_STACK_NAME
+            Type: PLAINTEXT
+            Value: devops-vpc-stack
+      TimeoutInMinutes: 15
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspecs/app-migrate-buildspec.yml
+
+  AppVerifyProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: app-verify
+      ServiceRole: !Ref CodeBuildRoleArn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: ECS_SERVICE_STACK_NAME
+            Type: PLAINTEXT
+            Value: !Ref EcsServiceStackName
+          - Name: ECS_CLUSTER_NAME
+            Type: PLAINTEXT
+            Value: !Ref EcsClusterName
+          - Name: NLB_STACK_NAME
+            Type: PLAINTEXT
+            Value: !Ref NlbStackName
+      TimeoutInMinutes: 15
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspecs/app-verify-buildspec.yml
+
+  AppPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: app-deployment-pipeline
+      PipelineType: V2
+      ExecutionMode: SUPERSEDED
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Triggers:
+        - ProviderType: CodeStarSourceConnection
+          GitConfiguration:
+            SourceActionName: SourceAction
+            Push:
+              - Branches:
+                  Includes:
+                    - !Ref GitHubBranch
+                FilePaths:
+                  Includes:
+                    - site_test/**
+                    - scripts/**
+                    - Containers/**
+                    - buildspecs/app-*
+                    - requirements.txt
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucketName
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              Namespace: SourceVars
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                FullRepositoryId: !Sub '${GitHubOwner}/${GitHubRepo}'
+                BranchName: !Ref GitHubBranch
+                ConnectionArn: !Ref GitHubConnectionArn
+              OutputArtifacts:
+                - Name: SourceOutput
+
+        - Name: Validate
+          Actions:
+            - Name: ValidateApp
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AppValidateProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: AppValidateArtifact
+
+        - Name: BuildPush
+          Actions:
+            - Name: BuildAndPushImage
+              Namespace: BuildVars
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AppBuildPushProject
+              InputArtifacts:
+                - Name: AppValidateArtifact
+              OutputArtifacts:
+                - Name: BuildOutput
+
+        - Name: Approval
+          Actions:
+            - Name: ManualApproval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                NotificationArn: !GetAtt AppApproveTopic.TopicArn
+                ExternalEntityLink: !Sub 'https://github.com/${GitHubOwner}/${GitHubRepo}/commit/#{SourceVars.CommitId}'
+                CustomData: 'Approval checklist: (1) validation/build stages passed, (2) expected image tag only, (3) deploy targets ecs-service-stack only, (4) rollback image tag identified, (5) safe to release now. Commit: #{SourceVars.CommitId}'
+
+        - Name: Deploy
+          Actions:
+            - Name: DeployECSClusterStack
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: ecs-cluster-stack
+                TemplatePath: AppValidateArtifact::Containers/ECS/ecs-cluster.yaml
+                RoleArn: !Ref CloudFormationDeployRoleArn
+                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM
+              InputArtifacts:
+                - Name: AppValidateArtifact
+              RunOrder: 1
+
+            - Name: DeployECSServiceStack
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: !Ref EcsServiceStackName
+                TemplatePath: AppValidateArtifact::Containers/ECS/ecs-service.yaml
+                RoleArn: !Ref CloudFormationDeployRoleArn
+                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM
+                ParameterOverrides: '{"ContainerImage":"#{BuildVars.IMAGE_URI}"}'
+              InputArtifacts:
+                - Name: AppValidateArtifact
+              RunOrder: 2
+
+        - Name: Migrate
+          Actions:
+            - Name: RunMigration
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AppMigrateProject
+              InputArtifacts:
+                - Name: AppValidateArtifact
+
+        - Name: Verify
+          Actions:
+            - Name: VerifyDeployment
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref AppVerifyProject
+              InputArtifacts:
+                - Name: AppValidateArtifact
+
+Outputs:
+  AppPipelineUrl:
+    Description: Application pipeline URL
+    Value: !Sub 'https://console.aws.amazon.com/codesuite/codepipeline/pipelines/${AppPipeline}/view'
+
+  AppPipelineName:
+    Description: Name of the application deployment pipeline
+    Value: !Ref AppPipeline
+
+  AppValidateProjectName:
+    Description: CodeBuild project name for app validation
+    Value: !Ref AppValidateProject
+
+  AppBuildPushProjectName:
+    Description: CodeBuild project name for app image build and push
+    Value: !Ref AppBuildPushProject
+
+  AppVerifyProjectName:
+    Description: CodeBuild project name for post-deploy verification
+    Value: !Ref AppVerifyProject

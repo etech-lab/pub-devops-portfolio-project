@@ -1,0 +1,3 @@
+psycopg2-binary>=2.9
+boto3>=1.42
+cfn-lint>=1.0

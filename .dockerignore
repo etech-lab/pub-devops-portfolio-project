@@ -1,0 +1,29 @@
+# VCS
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.wbtester/
+.venv/
+venv/
+
+# Local/editor
+.vscode/
+.idea/
+.DS_Store
+
+# Infra and docs not needed in runtime image
+cfn-infrastructure/
+README.md
+LICENSE
+Containers/EKS/
+Containers/ECS/

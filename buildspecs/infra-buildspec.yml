@@ -1,0 +1,38 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: us-east-1
+
+phases:
+  pre_build:
+    commands:
+      - echo "Installing dependencies..."
+      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - export AWS_ACCOUNT_ID
+      - echo "Using AWS account ${AWS_ACCOUNT_ID}"
+      - pip install --upgrade pip
+      - pip install -r requirements.txt
+
+  build:
+    commands:
+      - echo "Validating CloudFormation templates..."
+      - TEMPLATES=$(find cfn-infrastructure -type f \( -name "*.yml" -o -name "*.yaml" \))
+      - if [ -z "$TEMPLATES" ]; then echo "No CloudFormation templates found"; exit 1; fi
+      - cfn-lint --non-zero-exit-code error $TEMPLATES
+      - echo "CF templates passed validation"
+
+  post_build:
+    commands:
+      - echo "Build phase completed"
+
+artifacts:
+  files:
+    - cfn-infrastructure/**/*.yml
+    - cfn-infrastructure/**/*.yaml
+    - buildspecs/**/*
+  name: InfraArtifact
+
+cache:
+  paths:
+    - '/root/.cache/pip/**/*'

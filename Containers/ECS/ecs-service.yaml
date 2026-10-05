@@ -1,0 +1,257 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ECS Fargate service and task resources for WebsiteTester.
+  Deploy order: VPC -> NLB -> RDS -> ECS cluster -> ECS service.
+  Deploy with stack name 'ecs-service-stack' (referenced by CodePipeline app stack - btstrp-codepipeline-app-stack).
+  Expects NLB exports from stack 'devops-nlb-stack' and an existing ECS cluster name.
+  The default name for the ECS cluster is 'websitetester-cluster' and the default name for the ECS service stack is 'ecs-service-stack'.
+  Be sure to stick with the default names or update the parameters in this stack and the ECS service stack to match.
+
+Parameters:
+  VpcStackName:
+    Type: String
+    Default: devops-vpc-stack
+    Description: VPC stack name exporting VpcId and PrivateSubnets.
+
+  ClusterName:
+    Type: String
+    Default: websitetester-cluster
+    Description: Existing ECS cluster name. Default must match ClusterName in ecs-cluster.yaml
+      and EcsClusterName in btstrp-codepipeline-app.yaml.
+
+  ServiceName:
+    Type: String
+    Default: websitetester-service
+    Description: ECS service name.
+
+  TaskFamily:
+    Type: String
+    Default: websitetester-task
+    Description: ECS task definition family.
+
+  ContainerName:
+    Type: String
+    Default: websitetester
+    Description: Container name in task definition.
+
+  ContainerImage:
+    Type: String
+    Default: <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/websitetester:dev
+    Description: Full ECR image URI for an image in your ECR repository. Replace the account ID or override this value before deploying.
+
+  NlbStackName:
+    Type: String
+    Default: devops-nlb-stack
+    Description: NLB stack name exporting TargetGroupArn. Default matches the stack
+      deployed by the infra pipeline, keep default unless that stack was renamed.
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    Description: Number of running tasks.
+
+  TaskCpu:
+    Type: String
+    Default: '512'
+    AllowedValues:
+      - '256'
+      - '512'
+      - '1024'
+      - '2048'
+      - '4096'
+    Description: Fargate task CPU units.
+
+  TaskMemory:
+    Type: String
+    Default: '1024'
+    Description: Fargate task memory (MiB).
+
+  AppPort:
+    Type: Number
+    Default: 22
+    Description: Container port for SSH daemon.
+
+  RdsSecretName:
+    Type: String
+    Default: rds/db-credentials
+    Description: Secrets Manager secret name for RDS credentials.
+
+  SshPublicKeySecretName:
+    Type: String
+    Default: websitetester/ssh/webtester-public-key
+    Description: Secrets Manager secret name holding SSH public key.
+
+  RdsStackName:
+    Type: String
+    Default: devops-rds
+    Description: CloudFormation stack name for RDS outputs lookup.
+
+  AllowedIngressCidr:
+    Type: String
+    Default: 10.9.0.0/21
+    Description: CIDR allowed to reach task SSH port.
+
+Resources:
+  WebsiteTesterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/websitetester
+      RetentionInDays: 14
+
+  ECSServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for WebsiteTester ECS tasks
+      VpcId:
+        Fn::ImportValue: !Sub ${VpcStackName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+          CidrIp: !Ref AllowedIngressCidr
+          Description: Allow SSH traffic from VPC CIDR via NLB path
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ServiceName}-execution-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ServiceName}-task-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WebsiteTesterRuntimePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${RdsSecretName}*
+                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SshPublicKeySecretName}*
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${RdsStackName}/*
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'
+
+  WebsiteTesterTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref TaskFamily
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Ref ContainerName
+          Image: !Ref ContainerImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref AppPort
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WebsiteTesterLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  MigrateTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${TaskFamily}-migrate
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Ref ContainerName
+          Image: !Ref ContainerImage
+          Essential: true
+          EntryPoint:
+            - python
+          Command:
+            - /websitetester_app/scripts/migrate.py
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WebsiteTesterLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs-migrate
+
+  WebsiteTesterService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - WebsiteTesterTaskDefinition
+    Properties:
+      ServiceName: !Ref ServiceName
+      Cluster: !Ref ClusterName
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref WebsiteTesterTaskDefinition
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref ECSServiceSecurityGroup
+          Subnets: !Split
+            - ','
+            - Fn::ImportValue: !Sub ${VpcStackName}-PrivateSubnets
+      LoadBalancers:
+        - ContainerName: !Ref ContainerName
+          ContainerPort: !Ref AppPort
+          TargetGroupArn:
+            Fn::ImportValue: !Sub ${NlbStackName}-TargetGroupArn
+
+Outputs:
+  ServiceName:
+    Description: ECS service name.
+    Value: !Ref WebsiteTesterService
+
+  TaskDefinitionArn:
+    Description: Task definition ARN.
+    Value: !Ref WebsiteTesterTaskDefinition
+
+  MigrateTaskDefinitionArn:
+    Description: Migrate task definition ARN.
+    Value: !Ref MigrateTaskDefinition
+
+  ServiceSecurityGroupId:
+    Description: Security group ID attached to ECS tasks.
+    Value: !Ref ECSServiceSecurityGroup

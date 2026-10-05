@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Network Load Balancer for WebsiteTester ECS service.
+  Deploy after VPC stack and before ECS service stack.
+  Deploy with stack name 'devops-nlb-stack' (ECS service stack imports this stack's outputs).
+
+Parameters:
+  VpcStackName:
+    Type: String
+    Default: devops-vpc-stack
+    Description: Name of the VPC stack that exports VpcId and PublicSubnets.
+
+  NlbName:
+    Type: String
+    Default: websitetester-nlb
+    Description: Name of the Network Load Balancer.
+
+  ListenerPort:
+    Type: Number
+    Default: 22
+    MinValue: 1
+    MaxValue: 65535
+    Description: NLB listener port for SSH traffic.
+
+  TargetPort:
+    Type: Number
+    Default: 22
+    MinValue: 1
+    MaxValue: 65535
+    Description: Target group port for ECS tasks.
+
+Resources:
+  WebsiteTesterNLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Ref NlbName
+      Type: network
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: !Split
+        - ','
+        - Fn::ImportValue: !Sub ${VpcStackName}-PublicSubnets
+
+  WebsiteTesterTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${NlbName}-tg
+      Port: !Ref TargetPort
+      Protocol: TCP
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue: !Sub ${VpcStackName}-VpcId
+      HealthCheckEnabled: true
+      HealthCheckProtocol: TCP
+      HealthCheckPort: !Ref TargetPort
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  WebsiteTesterListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref WebsiteTesterNLB
+      Port: !Ref ListenerPort
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebsiteTesterTargetGroup
+
+Outputs:
+  NlbArn:
+    Description: ARN of the NLB.
+    Value: !Ref WebsiteTesterNLB
+    Export:
+      Name: !Sub ${AWS::StackName}-NlbArn
+
+  NlbDnsName:
+    Description: DNS name of the NLB.
+    Value: !GetAtt WebsiteTesterNLB.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-NlbDnsName
+
+  TargetGroupArn:
+    Description: Target group ARN for ECS service wiring.
+    Value: !Ref WebsiteTesterTargetGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-TargetGroupArn
+
+  ListenerArn:
+    Description: Listener ARN.
+    Value: !Ref WebsiteTesterListener
+    Export:
+      Name: !Sub ${AWS::StackName}-ListenerArn

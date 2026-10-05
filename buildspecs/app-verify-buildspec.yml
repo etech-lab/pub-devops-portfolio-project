@@ -1,0 +1,30 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: us-east-1
+
+phases:
+  build:
+    commands:
+      - echo "Resolving ECS service name from stack outputs..."
+      - >-
+        SERVICE_NAME=$(aws cloudformation describe-stacks
+        --stack-name "${ECS_SERVICE_STACK_NAME}"
+        --query "Stacks[0].Outputs[?OutputKey==\`ServiceName\`].OutputValue"
+        --output text)
+      - if [ -z "${SERVICE_NAME}" ] || [ "${SERVICE_NAME}" = "None" ]; then echo "Could not resolve service name from outputs"; exit 1; fi
+      - echo "Forcing new ECS deployment to cycle tasks with latest image..."
+      - aws ecs update-service --cluster "${ECS_CLUSTER_NAME}" --service "${SERVICE_NAME}" --force-new-deployment
+      - echo "Waiting for ECS service stability ${ECS_CLUSTER_NAME}/${SERVICE_NAME}"
+      - aws ecs wait services-stable --cluster "${ECS_CLUSTER_NAME}" --services "${SERVICE_NAME}"
+      - echo "Reading NLB DNS output for connectivity check..."
+      - >-
+        NLB_DNS=$(aws cloudformation describe-stacks
+        --stack-name "${NLB_STACK_NAME}"
+        --query "Stacks[0].Outputs[?OutputKey==\`NlbDnsName\`].OutputValue"
+        --output text)
+      - if [ -z "${NLB_DNS}" ] || [ "${NLB_DNS}" = "None" ]; then echo "Could not resolve NLB DNS from outputs"; exit 1; fi
+      - echo "Running TCP reachability check for SSH endpoint ${NLB_DNS}:22"
+      - timeout 10 nc -z ${NLB_DNS} 22
+      - echo "Post-deploy verification checks passed"

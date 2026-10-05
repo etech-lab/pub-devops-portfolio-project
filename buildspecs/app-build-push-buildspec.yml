@@ -1,0 +1,48 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: us-east-1
+  exported-variables:
+    - IMAGE_URI
+    - IMAGE_TAG
+    - IMAGE_REPOSITORY_URI
+
+phases:
+  pre_build:
+    commands:
+      - echo "Preparing container build context..."
+      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - export AWS_ACCOUNT_ID
+      - IMAGE_TAG=$(echo "${CODEBUILD_RESOLVED_SOURCE_VERSION:-manual}" | cut -c 1-12)
+      - IMAGE_REPOSITORY_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
+      - IMAGE_URI="${IMAGE_REPOSITORY_URI}:${IMAGE_TAG}"
+      - echo "Logging into ECR ${IMAGE_REPOSITORY_URI}"
+      - aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+  build:
+    commands:
+      - echo "Building Docker image ${IMAGE_URI}"
+      - docker build -f Containers/Docker/Dockerfile -t "${IMAGE_URI}" .
+      - docker tag "${IMAGE_URI}" "${IMAGE_REPOSITORY_URI}:proj"
+
+  post_build:
+    commands:
+      - echo "Pushing immutable image tag"
+      - docker push "${IMAGE_URI}"
+      - echo "Pushing convenience tag proj"
+      - docker push "${IMAGE_REPOSITORY_URI}:proj"
+      - |
+        cat > imageDetail.json <<EOF
+        {
+          "imageUri": "${IMAGE_URI}",
+          "imageTag": "${IMAGE_TAG}",
+          "repositoryUri": "${IMAGE_REPOSITORY_URI}"
+        }
+        EOF
+      - echo "Build and push completed"
+
+artifacts:
+  files:
+    - imageDetail.json
+  name: AppBuildArtifact

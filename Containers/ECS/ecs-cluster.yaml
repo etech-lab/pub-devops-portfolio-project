@@ -1,0 +1,31 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ECS cluster for WebsiteTester (Fargate).
+  Deploy with stack name 'ecs-cluster-stack' (referenced by ECS service stack).
+  The default name for the ECS cluster is 'websitetester-cluster' and the default name for the ECS service stack is 'ecs-service-stack'.
+  Be sure to stick with the default names or update the parameters in this stack and the ECS service stack to match.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: websitetester-cluster
+    Description: ECS cluster name. Default must match ClusterName in ecs-service.yaml
+      and EcsClusterName in btstrp-codepipeline-app.yaml.
+
+Resources:
+  WebsiteTesterCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+Outputs:
+  ClusterName:
+    Description: ECS cluster name.
+    Value: !Ref WebsiteTesterCluster
+
+  ClusterArn:
+    Description: ECS cluster ARN.
+    Value: !GetAtt WebsiteTesterCluster.Arn

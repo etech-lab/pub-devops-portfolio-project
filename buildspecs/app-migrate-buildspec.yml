@@ -1,0 +1,50 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: us-east-1
+
+phases:
+  build:
+    commands:
+      - echo "Resolving network configuration from CloudFormation outputs..."
+      - >-
+        PRIVATE_SUBNETS=$(aws cloudformation describe-stacks
+        --stack-name "${VPC_STACK_NAME}"
+        --query "Stacks[0].Outputs[?OutputKey==\`PrivateSubnets\`].OutputValue"
+        --output text)
+      - if [ -z "${PRIVATE_SUBNETS}" ] || [ "${PRIVATE_SUBNETS}" = "None" ]; then echo "Could not resolve private subnets"; exit 1; fi
+      - SUBNET_ID=$(echo "${PRIVATE_SUBNETS}" | cut -d',' -f1)
+      - >-
+        SECURITY_GROUP=$(aws cloudformation describe-stacks
+        --stack-name "${ECS_SERVICE_STACK_NAME}"
+        --query "Stacks[0].Outputs[?OutputKey==\`ServiceSecurityGroupId\`].OutputValue"
+        --output text)
+      - if [ -z "${SECURITY_GROUP}" ] || [ "${SECURITY_GROUP}" = "None" ]; then echo "Could not resolve security group"; exit 1; fi
+      - >-
+        TASK_DEF=$(aws cloudformation describe-stacks
+        --stack-name "${ECS_SERVICE_STACK_NAME}"
+        --query "Stacks[0].Outputs[?OutputKey==\`MigrateTaskDefinitionArn\`].OutputValue"
+        --output text)
+      - if [ -z "${TASK_DEF}" ] || [ "${TASK_DEF}" = "None" ]; then echo "Could not resolve task definition"; exit 1; fi
+      - echo "Running migration task on cluster ${ECS_CLUSTER_NAME}..."
+      - >-
+        TASK_ARN=$(aws ecs run-task
+        --cluster "${ECS_CLUSTER_NAME}"
+        --task-definition "${TASK_DEF}"
+        --launch-type FARGATE
+        --network-configuration "awsvpcConfiguration={subnets=[${SUBNET_ID}],securityGroups=[${SECURITY_GROUP}],assignPublicIp=DISABLED}"
+        --query "tasks[0].taskArn"
+        --output text)
+      - if [ -z "${TASK_ARN}" ] || [ "${TASK_ARN}" = "None" ]; then echo "Failed to start migration task"; exit 1; fi
+      - echo "Migration task started ${TASK_ARN}, waiting for completion..."
+      - aws ecs wait tasks-stopped --cluster "${ECS_CLUSTER_NAME}" --tasks "${TASK_ARN}"
+      - >-
+        EXIT_CODE=$(aws ecs describe-tasks
+        --cluster "${ECS_CLUSTER_NAME}"
+        --tasks "${TASK_ARN}"
+        --query "tasks[0].containers[0].exitCode"
+        --output text)
+      - echo "Migration task exited with code ${EXIT_CODE}"
+      - if [ "${EXIT_CODE}" != "0" ]; then echo "Migration failed with exit code ${EXIT_CODE}"; exit 1; fi
+      - echo "Database migration completed successfully"

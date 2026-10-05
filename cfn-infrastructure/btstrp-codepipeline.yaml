@@ -1,0 +1,284 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS CodePipeline for infrastructure deployments with CloudFormation.
+  Triggers from GitHub repository and uses CodeBuild for validation.
+  Deploy with stack name 'btstrp-codepipeline-infra-stack'.
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: etech-lab
+    Description: GitHub organization or username that owns the repository
+
+  GitHubRepo:
+    Type: String
+    Default: DevOps_WebsiteTester
+    Description: GitHub repository name
+
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: GitHub branch to track
+
+  GitHubConnectionArn:
+    Type: String
+    Description: ARN of GitHub CodeStar connection (must be created manually first)
+
+  CodeBuildRoleArn:
+    Type: String
+    Description: ARN of CodeBuild service role (from btstrp-codebuild-infra-role-stack)
+
+  ArtifactBucketName:
+    Type: String
+    Description: S3 bucket name for pipeline artifacts
+
+  ApprovalEmail:
+    Type: String
+    Description: Email address to receive manual approval notifications (passed at deploy time, never stored in repo)
+
+  CloudFormationDeployRoleArn:
+    Type: String
+    Description: ARN of CloudFormation execution role (from btstrp-codebuild-infra-role-stack)
+
+Resources:
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: codepipeline-infra-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+
+  CodePipelinePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: codepipeline-infra-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:GetObjectVersion
+            Resource: !Sub 'arn:aws:s3:::${ArtifactBucketName}/*'
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource: !Sub 'arn:aws:s3:::${ArtifactBucketName}'
+          - Effect: Allow
+            Action:
+              - codebuild:BatchGetBuilds
+              - codebuild:BatchGetProjects
+              - codebuild:StartBuild
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - codeconnections:UseConnection
+            Resource: !Ref GitHubConnectionArn
+          - Effect: Allow
+            Action:
+              - cloudformation:CreateStack
+              - cloudformation:UpdateStack
+              - cloudformation:DeleteStack
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:GetTemplateSummary
+              - cloudformation:CreateChangeSet
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:DeleteChangeSet
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !Ref CodeBuildRoleArn
+              - !Ref CloudFormationDeployRoleArn
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref ApproveTopic
+      Roles:
+        - !Ref CodePipelineRole
+
+  ApproveTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: infra-pipeline-approval
+
+  ApproveTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ApproveTopic
+      Protocol: email
+      Endpoint: !Ref ApprovalEmail
+
+  ValidateProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: infra-validate
+      ServiceRole: !Ref CodeBuildRoleArn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        Type: LINUX_CONTAINER
+      TimeoutInMinutes: 15
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspecs/infra-buildspec.yml
+
+  InfraPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: infra-deployment-pipeline
+      PipelineType: V2
+      ExecutionMode: SUPERSEDED
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Triggers:
+        - ProviderType: CodeStarSourceConnection
+          GitConfiguration:
+            SourceActionName: SourceAction
+            Push:
+              - Branches:
+                  Includes:
+                    - !Ref GitHubBranch
+                FilePaths:
+                  Includes:
+                    - cfn-infrastructure/**
+                    - buildspecs/infra-*
+                  Excludes:
+                    - cfn-infrastructure/btstrp-codepipeline-app.yaml
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucketName
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              Namespace: SourceVars
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                FullRepositoryId: !Sub '${GitHubOwner}/${GitHubRepo}'
+                BranchName: !Ref GitHubBranch
+                ConnectionArn: !Ref GitHubConnectionArn
+              OutputArtifacts:
+                - Name: SourceOutput
+
+        - Name: Validate
+          Actions:
+            - Name: ValidateInfra
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref ValidateProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: ValidateOutput
+
+        - Name: Approval
+          Actions:
+            - Name: ManualApproval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                NotificationArn: !GetAtt ApproveTopic.TopicArn
+                ExternalEntityLink: !Sub 'https://github.com/${GitHubOwner}/${GitHubRepo}/commit/#{SourceVars.CommitId}'
+                CustomData: 'Approval checklist: (1) Validate passed and expected templates only, (2) no unexpected IAM expansion, (3) no unexpected network exposure changes, (4) secrets remain on -pl names, (5) change is safe to apply now, (6) rollback approach is understood. Commit: #{SourceVars.CommitId}'
+
+        - Name: Deploy
+          Actions:
+            - Name: DeployVPC
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: devops-vpc-stack
+                TemplatePath: ValidateOutput::cfn-infrastructure/vpc-network.yaml
+                RoleArn: !Ref CloudFormationDeployRoleArn
+                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM
+              InputArtifacts:
+                - Name: ValidateOutput
+              RunOrder: 1
+
+            - Name: DeploySecrets
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: devops-secrets-stack
+                TemplatePath: ValidateOutput::cfn-infrastructure/pl-secrets.yaml
+                RoleArn: !Ref CloudFormationDeployRoleArn
+                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM
+              InputArtifacts:
+                - Name: ValidateOutput
+              RunOrder: 1
+
+            - Name: DeployNLB
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: devops-nlb-stack
+                TemplatePath: ValidateOutput::cfn-infrastructure/nlb-cfn.yaml
+                RoleArn: !Ref CloudFormationDeployRoleArn
+                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM
+              InputArtifacts:
+                - Name: ValidateOutput
+              RunOrder: 2
+
+            - Name: DeployRDS
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: devops-rds
+                TemplatePath: ValidateOutput::cfn-infrastructure/postgres-rds-cfn.yaml
+                RoleArn: !Ref CloudFormationDeployRoleArn
+                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM
+                ParameterOverrides: '{"DBPassword":"{{resolve:secretsmanager:rds/db-credentials:SecretString:password}}"}'
+              InputArtifacts:
+                - Name: ValidateOutput
+              RunOrder: 2
+
+Outputs:
+  PipelineUrl:
+    Description: CodePipeline URL
+    Value: !Sub 'https://console.aws.amazon.com/codesuite/codepipeline/pipelines/${InfraPipeline}/view'
+
+  PipelineName:
+    Description: Name of the infrastructure pipeline
+    Value: !Ref InfraPipeline
+
+  ValidateBuildProject:
+    Description: CodeBuild validation project name
+    Value: !Ref ValidateProject
